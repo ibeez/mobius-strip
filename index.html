@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The Möbius Strip, Fig. 04</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gaegu:wght@400;700&display=swap">
+<style>
+  :root {
+    --paper: #fbf5e6;
+    --label: #48545c; /* Blue Grey B47 */
+    --hand: "Gaegu", "Comic Sans MS", "Chalkboard SE", cursive;
+    color-scheme: light;
+  }
+  html, body { background: var(--paper); color: var(--label); }
+  body {
+    margin: 0;
+    min-height: 100%;
+    font-family: var(--hand);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-block: 24px 40px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    gap: 14px;
+  }
+  canvas {
+    width: min(100%, 760px);
+    aspect-ratio: 1200 / 1000;
+    max-width: 100%;
+    display: block;
+    touch-action: none;
+    cursor: grab;
+  }
+  canvas:active {
+    cursor: grabbing;
+  }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .controls button {
+    font: 700 18px/1 var(--hand);
+    color: var(--label);
+    background: transparent;
+    border: 1.5px solid var(--label);
+    border-radius: 10px;
+    padding: 8px 14px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .controls button:hover {
+    background: rgba(72, 84, 92, 0.08);
+  }
+  .controls button:focus-visible { outline: 2px solid #0846a9; outline-offset: 2px; }
+  .sr {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap;
+  }
+  .sr:focus { position: static; width: auto; height: auto; clip: auto; }
+</style>
+</head>
+<body>
+
+<canvas id="plate" width="1200" height="1000" role="img"
+  aria-label="Fig. 04. A Möbius strip written in letters, ONE SIDE in capitals on one face and one side in small letters on the other. An orange highlight runs along the edge and through the twist: after one lap the top edge has become the bottom edge, and after two it is back where it started. There is only one edge."></canvas>
+
+<div class="controls">
+  <button class="sr" id="btn-side" type="button">Start the edge over (side = 1)</button>
+  <button class="sr" id="btn-boundary" type="button">Trace the edge (edge = 1)</button>
+    <button class="sr" id="btn-pause" type="button">Pause</button>
+  <button class="sr" id="btn-record" type="button">Record one loop</button>
+</div>
+<div class="sr" aria-live="polite" id="live"></div>
+
+<script src="palette.js"></script>
+<script>
+const M = window.MARKERS || {
+  "Blue Grey B47": "#48545c",
+  "Cool Grey C43": "#9faab5",
+  "Frost Blue 182": "#7ce7fd",
+  "Dark Blue Light 15": "#519aff",
+  "POSCA Indigo": "#0846a9",
+  "POSCA Tomato Red": "#f8304d",
+  "Warm Coral 208": "#ff5662",
+  "Peach 18": "#ffb3b1",
+  "Blush 136": "#ffd2db",
+  "Light Cantaloupe 275": "#ffc137",
+  "POSCA Orange": "#ff8708",
+  "Sand 107": "#d06433",
+  "Pastel Lemon 39": "#ffef08"
+};
+
+const PAPER = "#fbf5e6";
+const LABEL = M["Blue Grey B47"];
+const BLUES = [M["POSCA Indigo"], M["Dark Blue Light 15"], M["Frost Blue 182"], M["Cool Grey C43"]];
+const CORALS = [M["POSCA Tomato Red"], M["Warm Coral 208"], M["Peach 18"], M["Blush 136"]];
+const GOLDS = [M["POSCA Orange"], M["Light Cantaloupe 275"], M["Sand 107"], M["Pastel Lemon 39"]];
+const FONT = '"Gaegu", "Comic Sans MS", "Chalkboard SE", cursive';
+
+const cv = document.getElementById("plate");
+const g = cv.getContext("2d");
+const S = 1200, H = 1000;
+const DPR = Math.min(2, window.devicePixelRatio || 1);
+cv.width = S * DPR; cv.height = H * DPR;
+g.scale(DPR, DPR);
+
+// ASCII grid: bigger cells than before so words along the ribbon stay readable
+const CW = 16, CH = 25;
+const COLS = 72, ROWS = 31;
+const GX = (S - COLS * CW) / 2;
+const GY = 205;
+const N = COLS * ROWS;
+
+// Strip geometry: a ring of radius R lying flat, ribbon half-width W
+const R = 2.4;
+const W = 0.8;
+const UNIT = 155;
+const CX = S / 2;
+const CY = 600;
+const BASE_PITCH = 0.48;
+const BASE_YAW = -0.3;  // the twist sits just right of front, facing the viewer
+
+const depth = new Float32Array(N);
+const shade = new Float32Array(N);
+const cellU = new Float32Array(N);
+const cellV = new Float32Array(N);
+const isBack = new Uint8Array(N);
+const readDir = new Float32Array(N); // screen px per radian of u: sign says which way the text reads, size says how foreshortened it is
+
+// Text that runs along the ribbon. Capitals live on one face, small letters on the other.
+const TXT = {
+  ringA: "OUTSIDE · OUTSIDE · ",
+  ringB: "inside · inside · ",
+  mobA: "ONE SIDE · ",
+  mobB: "one side · ",
+};
+const PER_RAD = (R * UNIT) / (CW * 1.05); // letters per radian, about one letter per cell along the strip
+
+const LOOP = 12;  // two laps of the edge, so the loop ends exactly where it began
+const TAIL = 3.0; // length of the orange highlight, in radians along the edge
+// wobble and breathing run a whole number of cycles per loop, so the recording still loops cleanly
+const BREATHE = (2 * Math.PI * 3) / LOOP, WOBBLE = (2 * Math.PI * 6) / LOOP;
+const BEAT = 2.5;
+const ease = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const clamp01 = x => Math.min(1, Math.max(0, x));
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// Intro: loop -> cut -> half-twist -> tape -> Möbius (seconds)
+const INTRO = [
+  { at: 0.0, text: "2 sides, 2 edges" },
+  { at: 2.6, text: "cut" },
+  { at: 3.6, text: "half-twist" },
+  { at: 6.2, text: "tape" },
+  { at: 7.6, text: "1 side, 1 edge" },
+];
+const INTRO_END = 10.5;
+
+function introState(t) {
+  // gap: how open the cut is (radians); tau: how much of the half-twist is in
+  const cut = ease(clamp01((t - 2.6) / 0.8)) - ease(clamp01((t - 6.2) / 1.0));
+  const tau = ease(clamp01((t - 3.6) / 2.4));
+  return { gap: 0.32 * cut, tau, merged: t >= 7.2 };
+}
+
+// Paper grain as one seamless tile: it covers the whole page behind the canvas,
+// and the canvas only paints it in when recording (a video needs its own background)
+const TILE = 420;
+const paper = (() => {
+  const c = document.createElement("canvas");
+  c.width = TILE; c.height = TILE;
+  const p = c.getContext("2d");
+  p.fillStyle = PAPER;
+  p.fillRect(0, 0, TILE, TILE);
+  const img = p.getImageData(0, 0, TILE, TILE), d = img.data;
+  let seed = 42;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const blot = [];
+  for (let i = 0; i < 6; i++) blot.push([rnd() * TILE, rnd() * TILE, 60 + rnd() * 110, rnd() < 0.5 ? -1 : 1]);
+  for (let y = 0; y < TILE; y++) {
+    for (let x = 0; x < TILE; x++) {
+      let n = (rnd() - 0.5) * 11;
+      for (const [bx, by, br, s] of blot) {
+        // distances wrap around the tile so its edges line up
+        let dx = Math.abs(x - bx), dy = Math.abs(y - by);
+        dx = Math.min(dx, TILE - dx); dy = Math.min(dy, TILE - dy);
+        const q = (dx * dx + dy * dy) / (br * br);
+        if (q < 1) n += s * 4 * (1 - q);
+      }
+      const idx = (x + y * TILE) * 4;
+      d[idx] += n; d[idx + 1] += n; d[idx + 2] += n * 1.1;
+    }
+  }
+  p.putImageData(img, 0, 0);
+  p.lineCap = "round";
+  for (let i = 0; i < 220; i++) {
+    const x = rnd() * TILE, y = rnd() * TILE, a = rnd() * Math.PI, l = 4 + rnd() * 12;
+    const mx = (rnd() - 0.5) * 3, my = (rnd() - 0.5) * 3;
+    p.strokeStyle = rnd() < 0.6 ? "rgba(120,100,70,0.09)" : "rgba(255,255,255,0.45)";
+    p.lineWidth = 0.6 + rnd() * 0.7;
+    // draw each fiber in all neighbouring tile positions so ones crossing an edge wrap
+    for (const ox of [-TILE, 0, TILE]) for (const oy of [-TILE, 0, TILE]) {
+      p.beginPath();
+      p.moveTo(x + ox, y + oy);
+      p.quadraticCurveTo(x + ox + Math.cos(a) * l * 0.5 + mx, y + oy + Math.sin(a) * l * 0.5 + my, x + ox + Math.cos(a) * l, y + oy + Math.sin(a) * l);
+      p.stroke();
+    }
+  }
+  return c;
+})();
+document.documentElement.style.background = `${PAPER} url(${paper.toDataURL()}) repeat`;
+document.body.style.background = "transparent";
+const paperPattern = g.createPattern(paper, "repeat");
+
+// Light vector from top-left front
+const LIGHT = (() => {
+  const l = [-0.4, 0.72, 0.56];
+  const mag = Math.hypot(...l);
+  return l.map(c => c / mag);
+})();
+
+function cellAt(px, py) {
+  const c = Math.floor((px - GX) / CW);
+  const r = Math.floor((py - GY) / CH);
+  return c < 0 || c >= COLS || r < 0 || r >= ROWS ? -1 : c + r * COLS;
+}
+
+function splat(px, py, z, k, u, v, back, dir) {
+  const i = cellAt(px, py);
+  if (i < 0 || z <= depth[i]) return;
+  depth[i] = z;
+  shade[i] = k;
+  cellU[i] = u;
+  cellV[i] = v;
+  isBack[i] = back;
+  readDir[i] = dir;
+}
+
+// A point on the ribbon. The ring lies in the X-Z plane, Y is up.
+// The ribbon stands upright like a plain paper loop. Cut at the front (u = 0), the end just to the
+// right of the cut turns by up to a half-turn (tau = 1) over a short stretch, the way you'd twist
+// real paper before taping it, so the twist is one visible place instead of spread thin around the loop.
+// The half-turn happens over one short stretch just past the seam, the way you'd twist real
+// paper before taping it, so the still camera sees it in one place
+const TWIST_FROM = 0.12, TWIST_LEN = 1.25;
+function twistAt(u) {
+  const q = clamp01((u - TWIST_FROM) / TWIST_LEN);
+  return q * q * (3 - 2 * q);
+}
+function ribbonPoint(u, v, tau) {
+  const th = Math.PI / 2 + tau * Math.PI * twistAt(u);
+  const ru = Math.cos(u), su = Math.sin(u);
+  const rr = R + v * Math.cos(th);
+  return [rr * su, v * Math.sin(th), rr * ru]; // u = 0 points toward +Z, the viewer; u runs left to right across the front
+}
+
+function getPointAndNormal(u, v, tau) {
+  const p = ribbonPoint(u, v, tau);
+  const e = 1e-3;
+  const a = ribbonPoint(u + e, v, tau), b = ribbonPoint(u, v + e, tau);
+  const tu = [a[0] - p[0], a[1] - p[1], a[2] - p[2]];
+  const tv = [b[0] - p[0], b[1] - p[1], b[2] - p[2]];
+  // tu x tv points outward on the plain loop, so "+n" is the OUTSIDE / capitals face
+  let nx = tu[1] * tv[2] - tu[2] * tv[1];
+  let ny = tu[2] * tv[0] - tu[0] * tv[2];
+  let nz = tu[0] * tv[1] - tu[1] * tv[0];
+  const mag = Math.hypot(nx, ny, nz) || 1;
+  return { x: p[0], y: p[1], z: p[2], nx: nx / mag, ny: ny / mag, nz: nz / mag };
+}
+
+// User drag & camera angles
+let dragPitch = BASE_PITCH;
+let dragYaw = 0;
+let isDragging = false;
+let lastPointerX = 0, lastPointerY = 0;
+let paused = false;
+
+cv.addEventListener("pointerdown", e => {
+  const [px, py] = toCanvas(e);
+  if (hitHeader(px, py)) return;
+  isDragging = true;
+  lastPointerX = e.clientX;
+  lastPointerY = e.clientY;
+  cv.setPointerCapture(e.pointerId);
+});
+
+cv.addEventListener("pointermove", e => {
+  if (!isDragging) {
+    const [px, py] = toCanvas(e);
+    cv.style.cursor = hitHeader(px, py) ? "pointer" : "grab";
+    return;
+  }
+  const dx = e.clientX - lastPointerX;
+  const dy = e.clientY - lastPointerY;
+  lastPointerX = e.clientX;
+  lastPointerY = e.clientY;
+  dragYaw += dx * 0.008;
+  dragPitch = Math.max(-0.9, Math.min(1.2, dragPitch + dy * 0.006));
+});
+
+window.addEventListener("pointerup", () => { isDragging = false; });
+window.addEventListener("pointercancel", () => { isDragging = false; });
+
+function getView(yawOffset, pitchOffset = 0) {
+  const yaw = BASE_YAW + dragYaw + yawOffset;
+  const pitch = dragPitch + pitchOffset;
+  return {
+    cy: Math.cos(yaw), sy: Math.sin(yaw),
+    cp: Math.cos(pitch), sp: Math.sin(pitch)
+  };
+}
+
+function project(v, x, y, z) {
+  const x1 = x * v.cy + z * v.sy;
+  const z1 = -x * v.sy + z * v.cy;
+  const y2 = y * v.cp - z1 * v.sp;
+  const z2 = y * v.sp + z1 * v.cp;
+  return [CX + x1 * UNIT, CY - y2 * UNIT, z2];
+}
+
+function rotNormal(v, nx, ny, nz) {
+  const x1 = nx * v.cy + nz * v.sy;
+  const z1 = -nx * v.sy + nz * v.cy;
+  const y2 = ny * v.cp - z1 * v.sp;
+  const z2 = ny * v.sp + z1 * v.cp;
+  return [x1, y2, z2];
+}
+
+function buildSurface(viewMat, gap, tau) {
+  depth.fill(-1e9);
+
+  const STEPS_U = 460;
+  const STEPS_V = 30;
+
+  for (let iu = 0; iu < STEPS_U; iu++) {
+    const u = gap + (iu / STEPS_U) * (2 * Math.PI - 2 * gap);
+    for (let iv = 0; iv <= STEPS_V; iv++) {
+      const v = -W + (iv / STEPS_V) * (2 * W);
+      const geom = getPointAndNormal(u, v, tau);
+      const [px, py, pz] = project(viewMat, geom.x, geom.y, geom.z);
+      const rn = rotNormal(viewMat, geom.nx, geom.ny, geom.nz);
+
+      // back = we are looking at the "-n" face (small letters)
+      const back = rn[2] < 0 ? 1 : 0;
+      let k = rn[0] * LIGHT[0] + rn[1] * LIGHT[1] + rn[2] * LIGHT[2];
+      if (back) k = -k;
+      const ahead = getPointAndNormal(u + 0.01, v, tau);
+      const dir = (project(viewMat, ahead.x, ahead.y, ahead.z)[0] - px) / 0.01;
+      splat(px, py, pz, k, u, v, back, dir);
+    }
+  }
+}
+
+// Header: both facts on one line, each one a button
+const HEAD = [
+  { text: "side = 1", mode: "side", family: "coral", offset: 0 },
+  { text: "edge = 1", mode: "boundary", family: "gold", offset: 0.18 },
+];
+const HEAD_SIZE = 66;
+const HEAD_Y = 96;
+const HEAD_GAP = 120;
+const STATUS_Y = 158;
+
+function beat(t) {
+  const u = ((t % BEAT) + BEAT) % BEAT;
+  const bump = (c, w) => {
+    const dd = Math.min(Math.abs(u - c), BEAT - Math.abs(u - c));
+    return Math.exp(-((dd / w) ** 2));
+  };
+  return bump(0.15, 0.09) + 0.6 * bump(0.45, 0.09);
+}
+
+function headColor(family, a) {
+  const lvl = a > 0.85 ? 0 : a > 0.45 ? 1 : 2;
+  if (family === "gold") return [GOLDS[0], GOLDS[0], GOLDS[2]][lvl];
+  return [CORALS[0], CORALS[1], CORALS[1]][lvl];
+}
+
+let mode = null; // null | "side" | "boundary"
+let modeStart = 0;
+let introStart = -1e9; // the twist intro is skipped: the piece opens on the finished strip
+let loopStart = performance.now();
+let popKey = "";
+let popStart = 0;
+let recording = false;
+let pauseAt = 0, pausedFor = 0;
+
+const popScale = u => {
+  const c = 1.8;
+  u = Math.min(1, Math.max(0, u));
+  return 1 + (c + 1) * (u - 1) ** 3 + c * (u - 1) ** 2;
+};
+
+function setMode(m) {
+  // the edge loop always runs; tapping either fact starts it over
+  loopStart = performance.now();
+}
+
+function introTime(now) {
+  if (reduced && !recording) return INTRO_END;
+  return (now - introStart) / 1000;
+}
+
+function hitHeader(px, py) {
+  for (const line of HEAD) {
+    if (!line.box) continue;
+    const [x, y, w, h] = line.box;
+    if (px >= x && px <= x + w && py >= y && py <= y + h) return line.mode;
+  }
+  return null;
+}
+
+function drawHeader(t, now, show) {
+  // series label, same spot and weight as the other figures
+  g.textBaseline = "alphabetic";
+  g.textAlign = "left";
+  g.font = `400 24px ${FONT}`;
+  g.globalAlpha = 0.7;
+  g.fillStyle = LABEL;
+  g.fillText("Fig. 04", 44, 62);
+  g.globalAlpha = 1;
+  g.textBaseline = "alphabetic";
+  g.textAlign = "left";
+  g.font = `700 ${HEAD_SIZE}px ${FONT}`;
+  const widths = HEAD.map(l => g.measureText(l.text).width);
+  let x0 = S / 2 - (widths[0] + widths[1] + HEAD_GAP) / 2;
+
+  HEAD.forEach((line, li) => {
+    const active = line.mode === "boundary";
+    const since = (now - modeStart) / 1000;
+    const kick = active && since < 1.2 ? beat(since * 1.6) * 1.4 : 0;
+    line.box = [x0 - 14, HEAD_Y - HEAD_SIZE * 0.8, widths[li] + 28, HEAD_SIZE];
+    let x = x0;
+    g.globalAlpha = show;
+    for (const ch of line.text) {
+      const w = g.measureText(ch).width;
+      const a = Math.max(beat(t - line.offset - (x - x0) * 0.0004), kick);
+      const s = 1 + 0.035 * a;
+      g.save();
+      g.translate(x + w / 2, HEAD_Y - HEAD_SIZE * 0.3);
+      g.scale(s, s);
+      g.fillStyle = headColor(line.family, a);
+      g.fillText(ch, -w / 2, HEAD_SIZE * 0.3);
+      g.restore();
+      x += w;
+    }
+    // a hand-drawn underline marks the one that is playing
+    if (active) {
+      g.strokeStyle = line.family === "gold" ? GOLDS[0] : CORALS[0];
+      g.lineWidth = 3;
+      g.lineCap = "round";
+      g.beginPath();
+      g.moveTo(x0, HEAD_Y + 12);
+      g.quadraticCurveTo(x0 + widths[li] / 2, HEAD_Y + 17, x0 + widths[li], HEAD_Y + 10);
+      g.stroke();
+    }
+    g.globalAlpha = 1;
+    x0 += widths[li] + HEAD_GAP;
+  });
+
+  // a small dot between the two facts
+  g.globalAlpha = show * 0.6;
+  g.fillStyle = LABEL;
+  g.beginPath();
+  g.arc(S / 2 + (widths[0] - widths[1]) / 2, HEAD_Y - HEAD_SIZE * 0.28, 5, 0, 2 * Math.PI);
+  g.fill();
+  g.globalAlpha = 1;
+}
+
+const live = document.getElementById("live");
+let lastLive = "";
+
+function frame(now) {
+  const nowP = paused ? pauseAt : now - pausedFor;
+  const it = introTime(nowP);
+  const intro = introState(it);
+  const inIntro = it < INTRO_END;
+
+  // The orange highlight runs along the one edge: e in [0, 2π) is the top rim, [2π, 4π) the
+  // bottom rim it turns into after the twist. Two laps make one seamless loop.
+  let t = ((nowP - loopStart) / 1000) % LOOP;
+  if (reduced && !recording) t = 0;
+  const head = (t / LOOP) * 4 * Math.PI;
+  const uHead = head % (2 * Math.PI);
+  const lap2 = head >= 2 * Math.PI;
+
+  // The camera holds still on the three-quarter view, twist in front; only the highlight moves
+  const vMat = getView(0);
+
+  g.clearRect(0, 0, S, H);
+  if (recording) { g.fillStyle = paperPattern; g.fillRect(0, 0, S, H); }
+
+  let status = "";
+  let statusColor = LABEL;
+  if (inIntro) {
+    for (const step of INTRO) if (it >= step.at) status = step.text;
+  } else {
+    statusColor = GOLDS[0];
+    status = lap2 ? "now the bottom edge" : "top edge";
+  }
+
+  const key = (inIntro ? "i" : mode || "hint") + status;
+  if (key !== popKey) { popKey = key; popStart = now; }
+  if (status !== lastLive) { lastLive = status; live.textContent = status; }
+
+  drawHeader(reduced && !recording ? 1 : (nowP - loopStart) / 1000, nowP, inIntro ? 0.35 : 1);
+
+  if (status) {
+    const k = reduced ? 1 : popScale((now - popStart) / 380);
+    g.save();
+    g.translate(S / 2, STATUS_Y);
+    g.scale(k, k);
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.font = `${statusColor === LABEL ? 400 : 700} 34px ${FONT}`;
+    g.fillStyle = statusColor;
+    g.fillText(status, 0, 0);
+    g.restore();
+  }
+
+  buildSurface(vMat, intro.gap, intro.tau);
+
+  // Render ASCII cells
+  g.save();
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  const A = intro.merged ? TXT.mobA : TXT.ringA;
+  const B = intro.merged ? TXT.mobB : TXT.ringB;
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const idx = c + r * COLS;
+      if (depth[idx] < -1e8) continue;
+
+      const px = GX + c * CW + CW / 2;
+      const py = GY + r * CH + CH / 2;
+
+      const u = cellU[idx];
+      const v = cellV[idx];
+      const k = shade[idx];
+      const back = isBack[idx];
+      const edge = Math.abs(v) > W * 0.84;
+
+      // s runs along the one side: capitals for the first lap, small letters for the second
+      const s = back ? u + 2 * Math.PI : u;
+      // e runs along the one edge: the top rim, then (after the seam) the bottom rim
+      const e = v > 0 ? u : u + 2 * Math.PI;
+
+      // a few lines of text run side by side along the ribbon, each shifted a little
+      const lane = Math.floor(((v + W) / (2 * W)) * 3);
+      const txt = back ? B : A;
+      // letters always run so they read left to right where you see them
+      const li = Math.floor(u * PER_RAD * Math.sign(readDir[idx])) + lane * 4;
+      let ch = txt[((li % txt.length) + txt.length) % txt.length];
+      // where the strip turns edge-on (the sides, the twist) letters would pile up into a jumble,
+      // so those cells get a plain dot in the face's color instead
+      if (Math.abs(readDir[idx]) < CW * PER_RAD * 0.75 && ch !== " ") ch = "·";
+
+      const lvl = k > 0.45 ? 0 : k > 0.1 ? 1 : 2;
+      let color = back ? [BLUES[2], BLUES[3], BLUES[3]][lvl] : [BLUES[0], BLUES[0], BLUES[1]][lvl];
+      let font = back ? `400 20px ${FONT}` : `700 25px ${FONT}`;
+
+      if (edge) {
+        ch = back ? "·" : "•";
+        color = back ? BLUES[3] : BLUES[1];
+        font = `700 20px ${FONT}`;
+      }
+
+      const behind = ((head - e) % (4 * Math.PI) + 4 * Math.PI) % (4 * Math.PI);
+      const streak = edge && behind < TAIL;
+      if (streak) {
+        // a bold streak: big orange dots that taper from the head
+        const f = behind / TAIL;
+        color = f < 0.7 ? GOLDS[0] : GOLDS[2];
+        ch = "●";
+        font = `700 ${Math.round(behind < 0.14 ? 44 : 34 - 12 * f)}px ${FONT}`;
+      }
+
+      if (ch === " ") continue;
+      // every letter wobbles a little and breathes between full and lighter ink, each on its own phase
+      const ph = ((c * 73 + r * 151) % 97) / 97 * 2 * Math.PI;
+      const still = reduced && !recording ? 0 : 1;
+      const breathe = 0.5 + 0.5 * Math.sin(t * BREATHE + ph);
+      const wx = still * 1.6 * Math.sin(t * WOBBLE + ph * 2);
+      const wy = still * 1.6 * Math.cos(t * WOBBLE + ph * 3);
+      if (!streak && !edge && !back && breathe > 0.82 && still) color = BLUES[1];
+      g.font = font;
+      g.fillStyle = color;
+      g.globalAlpha = streak ? 1 : 1 - 0.25 * breathe * still;
+      g.save();
+      g.translate(px + wx, py + wy);
+      g.rotate(still * 0.06 * Math.sin(t * WOBBLE + ph));
+      g.fillText(ch, 0, 0);
+      g.restore();
+      g.globalAlpha = 1;
+    }
+  }
+  g.restore();
+
+  requestAnimationFrame(frame);
+}
+
+function toCanvas(e) {
+  const b = cv.getBoundingClientRect();
+  return [(e.clientX - b.left) * S / b.width, (e.clientY - b.top) * H / b.height];
+}
+
+cv.addEventListener("click", e => {
+  const m = hitHeader(...toCanvas(e));
+  if (m) setMode(m);
+});
+
+function replay() {
+  loopStart = performance.now();
+}
+
+document.getElementById("btn-side").onclick = () => setMode("side");
+document.getElementById("btn-boundary").onclick = () => setMode("boundary");
+const btnPause = document.getElementById("btn-pause");
+btnPause.onclick = () => {
+  paused = !paused;
+  if (paused) pauseAt = performance.now() - pausedFor;
+  else pausedFor = performance.now() - pauseAt;
+  btnPause.textContent = paused ? "Play" : "Pause";
+};
+
+// Recording: two laps of the edge, one seamless loop
+const local = typeof location !== "undefined" && (location.protocol === "file:" || ["localhost", "127.0.0.1"].includes(location.hostname));
+const rec = document.getElementById("btn-record");
+rec.hidden = !local || !window.MediaRecorder;
+rec.onclick = () => {
+  const type = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"].find(t => MediaRecorder.isTypeSupported(t));
+  const mr = new MediaRecorder(cv.captureStream(30), { mimeType: type, videoBitsPerSecond: 12e6 });
+  const chunks = [];
+  mr.ondataavailable = e => chunks.push(e.data);
+  mr.onstop = () => {
+    recording = false;
+    rec.textContent = "Record one loop";
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob(chunks, { type }));
+    a.download = "mobius-strip." + (type.includes("mp4") ? "mp4" : "webm");
+    a.click();
+  };
+  recording = true;
+  paused = false; pausedFor = 0;
+  replay();
+  loopStart = performance.now();
+  rec.textContent = "Recording...";
+  mr.start();
+  setTimeout(() => mr.stop(), LOOP * 1000);
+};
+
+document.fonts.load(`700 66px "Gaegu"`).finally(() => requestAnimationFrame(frame));
+</script>
+</body>
+</html>

@@ -66,6 +66,7 @@
   aria-label="Fig. 04. A Möbius strip written in letters, ONE SIDE in capitals on one face and one side in small letters on the other. An orange highlight runs along the edge and through the twist: after one lap the top edge has become the bottom edge, and after two it is back where it started. There is only one edge."></canvas>
 
 <div class="controls">
+  <button id="btn-sound" type="button">sound: off</button>
   <button class="sr" id="btn-side" type="button">Start the edge over (side = 1)</button>
   <button class="sr" id="btn-boundary" type="button">Trace the edge (edge = 1)</button>
     <button class="sr" id="btn-pause" type="button">Pause</button>
@@ -268,6 +269,158 @@ function getPointAndNormal(u, v, tau) {
   return { x: p[0], y: p[1], z: p[2], nx: nx / mag, ny: ny / mag, nz: nz / mag };
 }
 
+// ---------- sound: all synthesized, original, soft ----------
+// Recipes are in ../chiptune-music.md. Silent until the first touch.
+let ac = null, master, musicBus, sfxBus, noise, air = null, timer = null;
+let muted = false;
+const midi = m => 440 * Math.pow(2, (m - 69) / 12);
+const PC = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+const note = s => s === "-" ? null : 12 * (+s.slice(-1) + 1) + PC[s[0]] + (s[1] === "#" ? 1 : 0);
+// four slow bars, 80 BPM: 4 bars of 3 s is exactly the 12 second loop, one lap of the edge every 2 bars
+const MEL = ["D6 - B5 - - - G5 -", "A5 - B5 - E5 - - -", "E6 - D6 - B5 - G5 -", "A5 - - - D5 - - -"].map(b => b.split(" ").map(note));
+const CHORDS = [[55, 59, 62, 66], [52, 55, 59, 62], [48, 55, 59, 64], [50, 55, 57, 62]];
+const BOX = [0, 1, 2, 3, 2, 1, 2, 3];   // the music box turning under the tune
+const BARS = MEL.length, STEPS = BARS * 8;
+const EIGHTH = 60 / 80 / 2;
+
+// the whole sound graph, built on whatever context `ac` is: live, or offline for the video
+function buildGraph() {
+  const comp = ac.createDynamicsCompressor();
+  comp.threshold.value = -16; comp.ratio.value = 5;
+  master = ac.createGain(); master.gain.value = muted ? 0 : 0.9;
+  master.connect(comp); comp.connect(ac.destination);
+  musicBus = ac.createGain(); musicBus.gain.value = 0.5; musicBus.connect(master);
+  // dreamy: a long, soft room
+  const verb = ac.createConvolver(), wet = ac.createGain();
+  const len = ac.sampleRate * 3.5, ir = ac.createBuffer(2, len, ac.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = ir.getChannelData(ch);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.5);
+  }
+  verb.buffer = ir; wet.gain.value = 0.5;
+  musicBus.connect(verb); verb.connect(wet); wet.connect(master);
+  sfxBus = ac.createGain(); sfxBus.gain.value = 0.9; sfxBus.connect(master);
+  sfxBus.connect(verb);
+  noise = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const d = noise.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+
+// the turning shimmer: airy noise that is always running, silent until you spin the strip
+function airInit() {
+  const s = ac.createBufferSource(), bp = ac.createBiquadFilter(), e = ac.createGain();
+  s.buffer = noise; s.loop = true;
+  bp.type = "bandpass"; bp.frequency.value = 2500; bp.Q.value = 3;
+  e.gain.value = 0;
+  s.connect(bp); bp.connect(e); e.connect(sfxBus);
+  s.start();
+  air = { bp, e };
+}
+function spin(speed) {
+  if (!air || muted) return;
+  const t = ac.currentTime, k = Math.min(1, speed / 40);
+  air.e.gain.setTargetAtTime(0.09 * k, t, 0.03);
+  air.bp.frequency.setTargetAtTime(1800 + 3500 * k, t, 0.05);
+  air.e.gain.setTargetAtTime(0, t + 0.08, 0.18);
+}
+
+function audioInit() {
+  if (ac) { ac.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  ac = new AC();
+  buildGraph();
+  airInit();
+  // the button says off until the first touch actually starts the sound
+  if (!muted) document.getElementById("btn-sound").textContent = "sound: on";
+  let stepI = 0, next = ac.currentTime + 0.12;
+  timer = setInterval(() => {
+    while (next < ac.currentTime + 0.12) { music(stepI, next); stepI = (stepI + 1) % STEPS; next += EIGHTH; }
+  }, 25);
+}
+
+function tone(bus, wave, f, t, dur, vol, glide) {
+  const o = ac.createOscillator(), e = ac.createGain();
+  o.type = wave;
+  o.frequency.setValueAtTime(f, t);
+  if (glide) o.frequency.exponentialRampToValueAtTime(glide, t + dur * 0.6);
+  e.gain.setValueAtTime(0.0001, t);
+  e.gain.exponentialRampToValueAtTime(vol, t + 0.004);
+  e.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(e); e.connect(bus);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+// celesta: a sine with a glassy partial four times up that rings a little longer than a mallet's
+function celesta(bus, f, t, vol, dur = 1.6) {
+  tone(bus, "sine", f, t, dur, vol);
+  tone(bus, "sine", f * 4, t, dur * 0.3, vol * 0.15);
+}
+// bell: partials that don't line up, so it shimmers like real metal
+function bell(f, t, vol, dur) {
+  for (const [r, v, d] of [[1, 1, 1], [2.76, 0.35, 0.6], [5.4, 0.15, 0.35], [2, 0.2, 0.8]]) tone(sfxBus, "sine", f * r, t, dur * d, vol * v);
+}
+// pad: each chord swells in slowly and hangs over the bar line
+function pad(notes, t, dur) {
+  for (const m of notes) for (const cents of [-6, 6]) {
+    const o = ac.createOscillator(), e = ac.createGain();
+    o.type = "sine"; o.frequency.value = midi(m); o.detune.value = cents;
+    e.gain.setValueAtTime(0, t);
+    e.gain.linearRampToValueAtTime(0.02, t + 1.2);
+    e.gain.setValueAtTime(0.02, t + dur);
+    e.gain.linearRampToValueAtTime(0, t + dur + 1.5);
+    o.connect(e); e.connect(musicBus);
+    o.start(t); o.stop(t + dur + 1.6);
+  }
+}
+function music(i, t) {
+  const bar = i >> 3, s = i & 7;
+  const m = MEL[bar][s];
+  if (m) celesta(musicBus, midi(m), t, 0.1);
+  celesta(musicBus, midi(CHORDS[bar][BOX[s]] + 12), t, 0.035, 1.0);
+  if (s === 0) {
+    pad(CHORDS[bar], t, 8 * EIGHTH);
+    tone(musicBus, "sine", midi(CHORDS[bar][0] - 12), t, 8 * EIGHTH, 0.12);
+  }
+}
+function duck(t) {
+  musicBus.gain.cancelScheduledValues(t);
+  musicBus.gain.setTargetAtTime(0.3, t, 0.03);
+  musicBus.gain.setTargetAtTime(0.5, t + 0.4, 0.3);
+}
+function sfx(kind, arg, at) {
+  if (!ac || muted) return;
+  const t = at ?? ac.currentTime + 0.005;
+  if (kind === "lap") {
+    // lap 1 done, the top edge turns into the bottom edge: bright. Lap 2 done, home: lower and rounder.
+    if (arg === 1) bell(midi(91), t, 0.09, 1.8);
+    else { bell(midi(79), t, 0.11, 2.6); bell(midi(86), t + 0.09, 0.05, 2.2); }
+    duck(t);
+  } else if (kind === "rewind") {
+    // a tiny rewind: three quick blips falling, then one back up
+    for (let k = 0; k < 3; k++) tone(sfxBus, "triangle", midi(86 - 3 * k), t + k * 0.045, 0.05, 0.06);
+    tone(sfxBus, "triangle", midi(79), t + 0.16, 0.12, 0.07, midi(86));
+  }
+}
+
+// the edge's laps, heard where the picture shows them
+let lapT = null;
+function listenLaps(t) {
+  if (lapT !== null) {
+    if (lapT < LOOP / 2 && t >= LOOP / 2) sfx("lap", 1);
+    else if (t < lapT) sfx("lap", 2);
+  }
+  lapT = t;
+}
+
+const btnSound = document.getElementById("btn-sound");
+btnSound.onclick = () => {
+  if (!ac) { audioInit(); return; }
+  muted = !muted;
+  master.gain.setTargetAtTime(muted ? 0 : 0.9, ac.currentTime, 0.03);
+  if (muted && air) air.e.gain.setTargetAtTime(0, ac.currentTime, 0.03);
+  btnSound.textContent = muted ? "sound: off" : "sound: on";
+};
+
 // User drag & camera angles
 let dragPitch = BASE_PITCH;
 let dragYaw = 0;
@@ -276,6 +429,7 @@ let lastPointerX = 0, lastPointerY = 0;
 let paused = false;
 
 cv.addEventListener("pointerdown", e => {
+  audioInit();
   const [px, py] = toCanvas(e);
   if (hitHeader(px, py)) return;
   isDragging = true;
@@ -294,6 +448,7 @@ cv.addEventListener("pointermove", e => {
   const dy = e.clientY - lastPointerY;
   lastPointerX = e.clientX;
   lastPointerY = e.clientY;
+  spin(Math.hypot(dx, dy));
   dragYaw += dx * 0.008;
   dragPitch = Math.max(-0.9, Math.min(1.2, dragPitch + dy * 0.006));
 });
@@ -394,6 +549,8 @@ const popScale = u => {
 function setMode(m) {
   // the edge loop always runs; tapping either fact starts it over
   loopStart = performance.now();
+  lapT = null;
+  sfx("rewind");
 }
 
 function introTime(now) {
@@ -480,6 +637,7 @@ function frame(now) {
   // bottom rim it turns into after the twist. Two laps make one seamless loop.
   let t = ((nowP - loopStart) / 1000) % LOOP;
   if (reduced && !recording) t = 0;
+  if (!paused && !(reduced && !recording)) listenLaps(t);
   const head = (t / LOOP) * 4 * Math.PI;
   const uHead = head % (2 * Math.PI);
   const lap2 = head >= 2 * Math.PI;

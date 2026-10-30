@@ -23,3 +23,7 @@ Then open http://127.0.0.1:8768/. Running locally also shows a **Record one loop
 ## How it works
 
 One canvas, plain JavaScript, no libraries. The strip is sampled point by point, projected, and z-buffered into a grid of letters. Cells where the strip turns edge-on become dots so letters never pile up. The edge is tracked as one coordinate that runs twice around the ring, so the highlight never jumps.
+
+## Sound
+
+All synthesized with Web Audio, silent until your first touch, with a `sound` button to mute it. A slow, dreamy celesta in G loops every 12 seconds, two bars per lap of the edge. A bright bell rings when the top edge becomes the bottom edge, and a lower one when it comes home. Turning the strip makes an airy shimmer that follows your speed, and tapping a fact plays a little rewind. Notes for other pieces: [`../chiptune-music.md`](../chiptune-music.md).
